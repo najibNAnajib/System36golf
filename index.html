@@ -1156,6 +1156,12 @@ function endPlayerDrag(e){
   if(chip){ chip.classList.remove('dragging'); chip.style.transform = ''; }
   dragPlayerId = null;
   dragPointerId = null;
+  // Player order syncs via each player's `seq` (used to sort them back into an
+  // array after a round-trip through Supabase). A manual drag sets the order
+  // the person actually wants, so renumber seq to match it now — otherwise
+  // the very next sync round-trip re-sorts everyone back to creation order,
+  // which looks like the reorder "snapping back" a second later.
+  state.players.forEach((p, i) => { p.seq = i; });
   saveState();
 }
 document.addEventListener('pointerup', endPlayerDrag);
