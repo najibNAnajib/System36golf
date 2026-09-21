@@ -198,8 +198,21 @@
     background:var(--cream); border:1px solid var(--line); border-radius:10px;
     padding:9px 12px; margin-top:8px;
   }
-  .player-chip .name{font-weight:600; font-size:14.5px;}
+  .player-chip .name{font-weight:600; font-size:14.5px; flex:1; min-width:0;}
   .player-chip .remove{background:none; border:none; color:var(--ink-soft); font-size:18px; line-height:1; padding:2px 6px;}
+  .drag-handle{
+    flex:none; width:28px; height:28px;
+    display:flex; align-items:center; justify-content:center;
+    color:var(--ink-soft); font-size:17px; line-height:1;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    cursor:grab; margin-right:2px;
+  }
+  .player-chip.dragging{
+    background:var(--white);
+    box-shadow:0 8px 20px rgba(0,0,0,0.25);
+    border-color:var(--fairway-500);
+    position:relative;
+  }
 
   .flight-header{
     font-size:11.5px; font-weight:800; color:var(--fairway-700);
@@ -711,7 +724,9 @@ function refreshCurrentScreen(){
     populateCourseSelect();
     renderCourseInfo();
   }
-  renderPlayers();
+  if(!dragPlayerId){
+    renderPlayers();
+  }
   if(activeEl !== sessionNameInput){
     sessionNameInput.value = state.sessionName || '';
   }
@@ -1052,14 +1067,99 @@ function renderPlayers(){
     flight.forEach(p=>{
       const row = document.createElement('div');
       row.className = 'player-chip';
-      row.innerHTML = `<span class="name">${escapeHtml(p.name)}</span><button class="remove" aria-label="remove">×</button>`;
+      row.dataset.playerId = p.id;
+      row.innerHTML = `<span class="drag-handle" aria-label="Drag to reorder">⠿</span><span class="name">${escapeHtml(p.name)}</span><button class="remove" aria-label="remove">×</button>`;
       row.querySelector('.remove').addEventListener('click', ()=> removePlayer(p.id));
+      row.querySelector('.drag-handle').addEventListener('pointerdown', (e)=> startPlayerDrag(e, p.id));
       playerListEl.appendChild(row);
     });
   });
   playerEmptyHint.style.display = state.players.length ? 'none' : 'block';
   startRoundBtn.disabled = state.players.length === 0;
 }
+
+/* ============================================================
+   DRAG TO REORDER PLAYERS BETWEEN FLIGHTS
+   Flights are just the player list chunked into groups of 4, so
+   reordering the underlying array is all that's needed — flight
+   headers and membership recompute automatically on re-render.
+   Uses Pointer Events so it works the same for touch (iPhone) and
+   mouse (desktop testing).
+   ============================================================ */
+let dragPlayerId = null;
+let dragPointerId = null;
+let dragOffsetY = 0; // where inside the chip the finger grabbed it
+
+function setChipTransform(chip, clientY){
+  chip.style.transform = 'none';
+  const naturalTop = chip.getBoundingClientRect().top;
+  const desiredTop = clientY - dragOffsetY;
+  chip.style.transform = `translateY(${desiredTop - naturalTop}px)`;
+}
+
+function startPlayerDrag(e, playerId){
+  if(e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  const chip = playerListEl.querySelector(`.player-chip[data-player-id="${playerId}"]`);
+  if(!chip) return;
+  const rect = chip.getBoundingClientRect();
+  dragPlayerId = playerId;
+  dragPointerId = e.pointerId;
+  dragOffsetY = e.clientY - rect.top;
+  chip.classList.add('dragging');
+  try{ chip.setPointerCapture(e.pointerId); }catch(err){ /* ignore */ }
+  setChipTransform(chip, e.clientY);
+}
+
+document.addEventListener('pointermove', (e)=>{
+  if(!dragPlayerId || e.pointerId !== dragPointerId) return;
+  e.preventDefault();
+  const chip = playerListEl.querySelector(`.player-chip[data-player-id="${dragPlayerId}"]`);
+  if(!chip) return;
+  setChipTransform(chip, e.clientY);
+
+  const others = Array.from(playerListEl.querySelectorAll('.player-chip'))
+    .filter(c => c.dataset.playerId !== dragPlayerId);
+  if(!others.length) return;
+
+  let targetIdx = state.players.length; // default: past the last one
+  for(const other of others){
+    const r = other.getBoundingClientRect();
+    const mid = r.top + r.height / 2;
+    const otherIdx = state.players.findIndex(p => p.id === other.dataset.playerId);
+    if(e.clientY < mid){
+      targetIdx = otherIdx;
+      break;
+    }
+    targetIdx = otherIdx + 1;
+  }
+
+  const draggedIdx = state.players.findIndex(p => p.id === dragPlayerId);
+  let insertIdx = targetIdx;
+  if(insertIdx > draggedIdx) insertIdx -= 1;
+
+  if(insertIdx !== draggedIdx){
+    const [item] = state.players.splice(draggedIdx, 1);
+    state.players.splice(insertIdx, 0, item);
+    renderPlayers();
+    const newChip = playerListEl.querySelector(`.player-chip[data-player-id="${dragPlayerId}"]`);
+    if(newChip){
+      newChip.classList.add('dragging');
+      setChipTransform(newChip, e.clientY);
+    }
+  }
+}, { passive: false });
+
+function endPlayerDrag(e){
+  if(!dragPlayerId || e.pointerId !== dragPointerId) return;
+  const chip = playerListEl.querySelector(`.player-chip[data-player-id="${dragPlayerId}"]`);
+  if(chip){ chip.classList.remove('dragging'); chip.style.transform = ''; }
+  dragPlayerId = null;
+  dragPointerId = null;
+  saveState();
+}
+document.addEventListener('pointerup', endPlayerDrag);
+document.addEventListener('pointercancel', endPlayerDrag);
 
 function escapeHtml(s){
   return s.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
