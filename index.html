@@ -415,7 +415,7 @@
       </div>
 
       <button class="btn btn-primary btn-full" id="start-round-btn">Start round</button>
-      <button class="btn btn-full" id="reset-session-btn" style="margin-top:10px; background:transparent; color:var(--flag-red); border:1.5px solid var(--flag-red); font-weight:700;">Clear &amp; start new session</button>
+      <button class="btn btn-full" id="reset-session-btn" style="margin-top:10px; background:transparent; color:var(--flag-red); border:1.5px solid var(--flag-red); font-weight:700;">Start new session (new link)</button>
     </section>
 
     <!-- ===================== SCORECARD ===================== -->
@@ -598,7 +598,7 @@ function getSessionCode(){
   if(!code) code = Math.random().toString(36).slice(2,8).toUpperCase();
   return code;
 }
-const SESSION_CODE = getSessionCode();
+let SESSION_CODE = getSessionCode();
 
 /* ============================================================
    PERSISTENCE
@@ -608,20 +608,20 @@ const SESSION_CODE = getSessionCode();
    its Net/Gross toggle) stay per-device in localStorage — otherwise one
    person flipping through holes would drag everyone else's screen along.
    ============================================================ */
-const LOCAL_ONLY_KEY = 'system36_local_' + SESSION_CODE;
+function getLocalOnlyKey(){ return 'system36_local_' + SESSION_CODE; }
 const LOCAL_ONLY_FIELDS = ['currentHole','currentFlight','boardMode'];
-const FULL_LOCAL_KEY = 'system36_full_' + SESSION_CODE; // used only when Supabase isn't configured
+function getFullLocalKey(){ return 'system36_full_' + SESSION_CODE; } // used only when Supabase isn't configured
 
 function saveLocalOnly(){
   try{
     const slice = {};
     LOCAL_ONLY_FIELDS.forEach(k => slice[k] = state[k]);
-    localStorage.setItem(LOCAL_ONLY_KEY, JSON.stringify(slice));
+    localStorage.setItem(getLocalOnlyKey(), JSON.stringify(slice));
   }catch(e){ /* ignore */ }
 }
 function loadLocalOnly(){
   try{
-    const raw = localStorage.getItem(LOCAL_ONLY_KEY);
+    const raw = localStorage.getItem(getLocalOnlyKey());
     if(raw) Object.assign(state, JSON.parse(raw));
   }catch(e){ /* ignore */ }
 }
@@ -674,7 +674,7 @@ let saveInFlight = false, saveQueued = false;
 async function saveState(){
   saveLocalOnly();
   if(!supabaseClient){
-    try{ localStorage.setItem(FULL_LOCAL_KEY, JSON.stringify(state)); }catch(e){ /* ignore */ }
+    try{ localStorage.setItem(getFullLocalKey(), JSON.stringify(state)); }catch(e){ /* ignore */ }
     return;
   }
   if(saveInFlight){ saveQueued = true; return; }
@@ -704,14 +704,21 @@ function refreshCurrentScreen(){
   if(activeTab === 'board'){ renderSessionBanner(); renderBoard(); }
 }
 
+let realtimeChannel = null;
 function subscribeRealtime(){
   if(!supabaseClient) return;
-  supabaseClient
+  realtimeChannel = supabaseClient
     .channel('round-' + SESSION_CODE)
     .on('postgres_changes',
       { event: 'UPDATE', schema: 'public', table: 'rounds', filter: 'code=eq.' + SESSION_CODE },
       (payload) => { applySharedData(payload.new.data); refreshCurrentScreen(); })
     .subscribe();
+}
+function unsubscribeRealtime(){
+  if(supabaseClient && realtimeChannel){
+    try{ supabaseClient.removeChannel(realtimeChannel); }catch(e){ /* ignore */ }
+    realtimeChannel = null;
+  }
 }
 
 async function loadState(){
@@ -723,7 +730,7 @@ async function loadState(){
 
   if(!supabaseClient){
     try{
-      const raw = localStorage.getItem(FULL_LOCAL_KEY);
+      const raw = localStorage.getItem(getFullLocalKey());
       if(raw) Object.assign(state, JSON.parse(raw));
     }catch(e){ /* ignore */ }
     setSyncStatus('Solo mode — add your Supabase keys in the code to enable live sharing');
@@ -1049,20 +1056,57 @@ startRoundBtn.addEventListener('click', ()=>{
   showToast('Round started — good luck!');
 });
 
-document.getElementById('reset-session-btn').addEventListener('click', ()=>{
-  const ok = confirm('Clear all players and scores for everyone on this link and start a new session? The selected course and any saved courses are kept.');
-  if(!ok) return;
-  state.players.forEach(p => pendingRemovals.push(p.id));
+async function startNewSession(){
+  unsubscribeRealtime();
+
+  // Mint a fresh code and move the address bar (and the share-link box) to it,
+  // so the link handed out from here on points at a brand-new, empty session.
+  // The old link is left untouched — it'll keep showing this round's last state.
+  const newCode = Math.random().toString(36).slice(2,8).toUpperCase();
+  SESSION_CODE = newCode;
+  try{
+    const params = new URLSearchParams(location.search);
+    params.set('s', newCode);
+    history.replaceState(null, '', location.pathname + '?' + params.toString());
+  }catch(e){ /* restricted preview context — share box below still gets the right value */ }
+
   state.sessionName = '';
   state.players = [];
   state.scores = {};
   state.currentHole = 0;
   state.currentFlight = 0;
   state.started = false;
+  pendingRemovals = [];
+
   sessionNameInput.value = '';
   renderPlayers();
-  saveState();
-  showToast('Cleared — ready for a new session');
+  try{
+    const shareLinkInput = document.getElementById('share-link-input');
+    if(shareLinkInput) shareLinkInput.value = location.href;
+  }catch(e){ /* ignore */ }
+
+  if(supabaseClient){
+    try{
+      setSyncStatus('Connecting…');
+      await supabaseClient.rpc('merge_round_state', { p_code: SESSION_CODE, p_patch: {} }); // creates the new row
+      setSyncStatus('● Live');
+    }catch(e){
+      console.error('new session init failed', e);
+      setSyncStatus('⚠ Could not connect — check your Supabase keys');
+    }
+    subscribeRealtime();
+  } else {
+    try{ localStorage.setItem(getFullLocalKey(), JSON.stringify(state)); }catch(e){ /* ignore */ }
+    setSyncStatus('Solo mode — add your Supabase keys in the code to enable live sharing');
+  }
+
+  showToast('New session ready — share the updated link!');
+}
+
+document.getElementById('reset-session-btn').addEventListener('click', ()=>{
+  const ok = confirm('Start a brand new session with a fresh shareable link? This clears players and scores here (course selection and saved courses are kept). Anyone still holding the old link will keep seeing this round\u2019s final result there.');
+  if(!ok) return;
+  startNewSession();
 });
 
 /* ============================================================
