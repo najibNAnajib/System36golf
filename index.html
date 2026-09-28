@@ -694,6 +694,9 @@ function saveStateDebounced(delay){
 }
 
 let saveInFlight = false, saveQueued = false;
+let clientRevCounter = 0;
+const pendingLocalRevs = new Set(); // revs of our own writes we're still expecting an echo for
+
 async function saveState(){
   saveLocalOnly();
   if(!supabaseClient){
@@ -703,7 +706,10 @@ async function saveState(){
   if(saveInFlight){ saveQueued = true; return; }
   saveInFlight = true;
   try{
+    const rev = ++clientRevCounter;
+    pendingLocalRevs.add(rev);
     const patch = buildSharedPatch();
+    patch.rev = rev;
     const { error } = await supabaseClient.rpc('merge_round_state', { p_code: SESSION_CODE, p_patch: patch });
     if(error) throw error;
     pendingRemovals = [];
@@ -742,7 +748,20 @@ function subscribeRealtime(){
     .channel('round-' + SESSION_CODE)
     .on('postgres_changes',
       { event: 'UPDATE', schema: 'public', table: 'rounds', filter: 'code=eq.' + SESSION_CODE },
-      (payload) => { applySharedData(payload.new.data); refreshCurrentScreen(); })
+      (payload) => {
+        const incomingRev = payload.new.data && payload.new.data.rev;
+        if(incomingRev !== undefined && pendingLocalRevs.has(incomingRev)){
+          // This is the echo of a write we made ourselves — we already have
+          // this (or newer) data locally. Applying it anyway risks stomping
+          // a more recent local edit made while this echo was in transit,
+          // which is what caused scores to appear to "reset" a moment after
+          // typing them. Just clear it from the pending set and move on.
+          pendingLocalRevs.delete(incomingRev);
+          return;
+        }
+        applySharedData(payload.new.data);
+        refreshCurrentScreen();
+      })
     .subscribe();
 }
 function unsubscribeRealtime(){
